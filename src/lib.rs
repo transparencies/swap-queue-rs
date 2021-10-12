@@ -67,6 +67,7 @@ impl<T> Buffer<T> {
 
   /// Writes `task` into the specified `index`.
   unsafe fn write(&self, index: isize, task: T) {
+    println!("WRITE @ {}", &index);
     ptr::write_volatile(self.at(index), task)
   }
 }
@@ -90,6 +91,7 @@ struct Inner<T> {
 
 impl<T> Drop for Inner<T> {
   fn drop(&mut self) {
+    println!("DROP INNER");
     let slot = self.slot.load(Ordering::Relaxed);
 
     if slot & BUFFER_SWAPPED == 0 {
@@ -157,6 +159,7 @@ impl<T> Worker<T> {
   /// let w = Worker::<i32>::new();
   /// ```
   pub fn new() -> Worker<T> {
+    println!("NEW WORKER");
     let buffer = Buffer::alloc(MIN_CAP);
 
     let inner = Arc::new(CachePadded::new(Inner {
@@ -193,6 +196,7 @@ impl<T> Worker<T> {
   /// Resizes the internal buffer to the new capacity of `new_cap`.
   #[cold]
   unsafe fn resize(&self, new_cap: usize, length: isize) {
+    println!("RESIZE");
     let buffer = self.buffer.get();
 
     // Allocate a new buffer and copy data from the old buffer to the new one.
@@ -200,7 +204,9 @@ impl<T> Worker<T> {
 
     ptr::copy_nonoverlapping(buffer.at(0), new.at(0), length as usize);
 
+    println!("RESIZE PINNING");
     let guard = &epoch::pin();
+    println!("RESIZE PINNED");
 
     self.buffer.set(new);
 
@@ -209,7 +215,10 @@ impl<T> Worker<T> {
       .buffer
       .swap(Owned::new(new), Ordering::Release, guard);
 
-    guard.defer_unchecked(move || old.into_owned().into_box().dealloc());
+    guard.defer_unchecked(move || {
+      println!("RESIZE DEALLOC");
+      old.into_owned().into_box().dealloc()
+    });
 
     // If the buffer is very large, then flush the thread-local garbage in order to deallocate
     // it as soon as possible.
@@ -226,6 +235,7 @@ impl<T> Worker<T> {
       .fetch_add(1 << FLAGS_SHIFT, Ordering::AcqRel);
 
     if slot & BUFFER_SWAPPED == BUFFER_SWAPPED {
+      println!("PUSH -> BUFFER SWAPPED");
       let buffer = if slot >> FLAGS_SHIFT == 0 {
         // Buffer was never swapped out, so use original buffer
         self.buffer.get()
@@ -234,7 +244,9 @@ impl<T> Worker<T> {
 
         let buffer = Buffer::alloc(MIN_CAP);
 
+        println!("PUSH PINNING");
         let guard = &epoch::pin();
+        println!("PUSH PINNED");
 
         let mut new = Owned::new(buffer).into_shared(guard);
 
@@ -310,7 +322,9 @@ impl<T> Worker<T> {
 
     let buffer = Buffer::alloc(MIN_CAP);
 
+    println!("TAKE PINNING");
     let guard = &epoch::pin();
+    println!("TAKE PINNED");
 
     let new = Owned::new(buffer).into_shared(guard);
 
@@ -354,10 +368,13 @@ impl<T> Stealer<T> {
 
     // Buffer already taken; no new pushes
     if slot == 0 || slot & BUFFER_SWAPPED == BUFFER_SWAPPED {
+      println!("BUFFER ALREADY TAKEN");
       return vec![];
     }
 
     let slot = slot >> FLAGS_SHIFT;
+
+    println!("TAKING @ {}", &slot);
 
     let backoff = Backoff::new();
 
@@ -370,7 +387,9 @@ impl<T> Stealer<T> {
       }
     }
 
+    println!("TAKE PINNING");
     let guard = &epoch::pin();
+    println!("TAKE PINNED");
 
     let old = self
       .inner
@@ -378,6 +397,7 @@ impl<T> Stealer<T> {
       .swap(Shared::null(), Ordering::AcqRel, guard);
 
     unsafe {
+      println!("BUFFER TAKEN @ {}", &slot);
       let old = old.into_owned();
       Vec::from_raw_parts(old.ptr, slot as usize, old.cap)
     }
